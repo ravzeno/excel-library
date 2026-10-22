@@ -40,6 +40,37 @@ For imports, pass `file.getInputStream()` or `file.getBytes()` to
 exports. The library intentionally does not depend on
 Spring's `MultipartFile`.
 
+For simple schemas, no service subclass is needed:
+
+```java
+var exporter = AbstractExcelExportService.of(
+    OrderRow.class, "Orders", row -> new Object[] {row.code(), row.amount()});
+var importer = AbstractExcelImportService.of(OrderImportRow.class, 1, 1, 2);
+var xlsx = exporter.export(orders).bytes();
+var result = importer.importFromExcel(xlsx);
+```
+
+When an `@ExcelImportColumn` supplies `headerName`, the uploaded header is checked before any
+data is mapped. `ExcelImportError` coordinates are zero-based physical worksheet coordinates.
+
+## Templates, validation, and error feedback
+
+Create a header-only template with `exportTemplate(sheetName, filename)`, or one workbook with
+several worksheets sharing the same row schema through `exportWorkbook(requests, filename)`.
+Exported sheets freeze the header by default; set `freezeHeader` to `false` on
+`ExcelExportRequest` when needed. Add `allowedValues` to `@ExcelColumn` to create a dropdown.
+
+Imports support `minValue`, `maxValue`, `allowedValues`, and the existing length/pattern rules.
+For domain rules involving more than one field, override `validateRow`; returning any
+`ExcelImportError` rejects that row. To return a user-correctable spreadsheet, create a marked
+copy of the original upload:
+
+```java
+byte[] errorWorkbook = ExcelImportErrorWorkbook.create(originalXlsx, importResult);
+```
+
+The resulting XLSX highlights invalid cells and adds each error as a cell comment.
+
 ## Large files
 
 `AbstractExcelExportService` uses Apache POI's streaming workbook and retains only 100 generated

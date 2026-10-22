@@ -7,12 +7,12 @@ package com.ravzeno.excel.model;
  * @param isConvertSuccess whether the conversion completed successfully
  */
 public record ConvertValueData(Object value, boolean isConvertSuccess) {
-    /**
-     * Creates the canonical failed conversion result.
-     *
-     * @return result containing no value and a failed status
-     */
-    public static ConvertValueData failure() {
-        return new ConvertValueData(null, false);
-    }
+  /**
+   * Creates the canonical failed conversion result.
+   *
+   * @return result containing no value and a failed status
+   */
+  public static ConvertValueData failure() {
+    return new ConvertValueData(null, false);
+  }
 }

@@ -3,6 +3,7 @@ import org.gradle.api.publish.maven.MavenPublication
 plugins {
     `java-library`
     `maven-publish`
+    id("com.diffplug.spotless") version "7.0.2"
 }
 
 group = "com.ravzeno"
@@ -29,6 +30,13 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+spotless {
+    java {
+        googleJavaFormat()
+        target("src/**/*.java")
+    }
 }
 
 publishing {

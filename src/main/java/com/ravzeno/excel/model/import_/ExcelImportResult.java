@@ -12,8 +12,11 @@ import java.util.List;
  * @param invalidRows number of rows rejected because of one or more errors
  * @param <T> DTO type requested by the caller
  */
-public record ExcelImportResult<T>(List<T> data, List<ExcelImportError> errors, int totalRows,
-        int validRows, int invalidRows) {
-    /** Protects both result collections from caller mutation. */
-    public ExcelImportResult { data = List.copyOf(data); errors = List.copyOf(errors); }
+public record ExcelImportResult<T>(
+    List<T> data, List<ExcelImportError> errors, int totalRows, int validRows, int invalidRows) {
+  /** Protects both result collections from caller mutation. */
+  public ExcelImportResult {
+    data = List.copyOf(data);
+    errors = List.copyOf(errors);
+  }
 }
