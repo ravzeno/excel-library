@@ -43,7 +43,7 @@ publishing {
             name = "GitHubPackages"
             val repository = providers.gradleProperty("github.repository")
                 .orElse(providers.environmentVariable("GITHUB_REPOSITORY"))
-                .orNull ?: "ratikorn2542/excel-library"
+                .orNull ?: "ravzeno/excel-library"
             url = uri("https://maven.pkg.github.com/$repository")
             credentials {
                 username = providers.gradleProperty("gpr.user")
