@@ -1,23 +1,56 @@
 # Excel Library
 
-Standalone Java 21 library for annotated Excel import and export, built on Apache POI.
+**A lightweight Java library for importing and exporting Excel workbooks with annotated models.**
 
-The code was migrated from Core Insure's Excel helper package. Its package is now
-`com.ravzeno.excel`, with no Spring or Lombok dependency.
+Built on Apache POI, this standalone Java 21 library provides XLSX import and export, field-level
+validation, reusable templates, and streaming APIs for large files. It has no Spring or Lombok
+dependency, so it can be used in any Java application.
 
-## Use from Java projects
+## Contents
 
-Publish the library to your local Maven repository:
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Import validation](#import-validation)
+- [Templates and multiple sheets](#templates-and-multiple-sheets)
+- [Streaming large imports and exports](#streaming-large-imports-and-exports)
+- [Date handling](#date-handling)
+- [CSV imports](#csv-imports)
+- [Spring Boot integration](#spring-boot-integration)
+- [Publishing](#publishing)
 
-```bash
-./gradlew publishToMavenLocal
-```
+## Features
 
-Then add this dependency to a Gradle JVM project:
+- Map annotated Java fields to worksheet columns.
+- Import XLSX files with required-field, length, numeric-range, allowed-value, and pattern checks.
+- Validate uploaded headers and apply custom rules across fields.
+- Export annotated rows, header-only templates, and workbooks with multiple sheets.
+- Create a marked copy of an uploaded workbook with invalid cells highlighted and annotated.
+- Stream XLSX rows with Apache POI's SAX reader and export rows with a streaming workbook.
+- Import CSV files using the same annotations and validation rules.
+
+## Requirements
+
+- Java 21 or later
+- Gradle for building from source
+
+## Installation
+
+### Use the published package
+
+Add the GitHub Packages repository and dependency to your Gradle build. GitHub Packages requires
+authentication with a classic personal access token that has `read:packages` permission.
 
 ```kotlin
 repositories {
-    mavenLocal()
+    maven {
+        url = uri("https://maven.pkg.github.com/ravzeno/excel-library")
+        credentials {
+            username = providers.gradleProperty("gpr.user").orNull
+            password = providers.gradleProperty("gpr.key").orNull
+        }
+    }
     mavenCentral()
 }
 
@@ -26,93 +59,207 @@ dependencies {
 }
 ```
 
-Use imports beginning with:
-
-```java
-com.ravzeno.excel
-```
-
-To migrate from Core Insure, replace the former package prefix
-`com.x_connext.go_max_service.library.excel` with `com.ravzeno.excel`.
-
-For imports, pass `file.getInputStream()` or `file.getBytes()` to
-`AbstractExcelImportService#importFromExcel`; use `AbstractExcelExportService` for workbook
-exports. The library intentionally does not depend on
-Spring's `MultipartFile`.
-
-For simple schemas, no service subclass is needed:
-
-```java
-var exporter = AbstractExcelExportService.of(
-    OrderRow.class, "Orders", row -> new Object[] {row.code(), row.amount()});
-var importer = AbstractExcelImportService.of(OrderImportRow.class, 1, 1, 2);
-var xlsx = exporter.export(orders).bytes();
-var result = importer.importFromExcel(xlsx);
-```
-
-When an `@ExcelImportColumn` supplies `headerName`, the uploaded header is checked before any
-data is mapped. `ExcelImportError` coordinates are zero-based physical worksheet coordinates.
-
-## Templates, validation, and error feedback
-
-Create a header-only template with `exportTemplate(sheetName, filename)`, or one workbook with
-several worksheets sharing the same row schema through `exportWorkbook(requests, filename)`.
-Exported sheets freeze the header by default; set `freezeHeader` to `false` on
-`ExcelExportRequest` when needed. Add `allowedValues` to `@ExcelColumn` to create a dropdown.
-
-Imports support `minValue`, `maxValue`, `allowedValues`, and the existing length/pattern rules.
-For domain rules involving more than one field, override `validateRow`; returning any
-`ExcelImportError` rejects that row. To return a user-correctable spreadsheet, create a marked
-copy of the original upload:
-
-```java
-byte[] errorWorkbook = ExcelImportErrorWorkbook.create(originalXlsx, importResult);
-```
-
-The resulting XLSX highlights invalid cells and adds each error as a cell comment.
-
-## Large files
-
-`AbstractExcelExportService` uses Apache POI's streaming workbook and retains only 100 generated
-rows in memory. For a large export, pass a lazy `Iterable<T>` (for example, one that pages a
-database query) and write directly to an HTTP response or file stream:
-
-```java
-exportService.writeTo(rows, response.getOutputStream());
-```
-
-Imports use Apache POI's SAX reader, so the workbook itself is not loaded into memory. Prefer the
-`InputStream` overload for uploads. `ExcelImportResult` still retains the mapped rows and errors;
-process or page extremely large imports separately if retaining every result is not acceptable.
-
-Build and test with the included Gradle 9.3.0 wrapper:
-
-```bash
-./gradlew test
-```
-
-The wrapper allows up to two minutes for its initial download, which avoids short network
-timeouts during IDE import.
-
-## Publish to GitHub Packages
-
-The release workflow publishes `com.ravzeno:excel-library` to GitHub Packages when a GitHub
-Release is created. Published versions are immutable, so update `version` in `build.gradle.kts`
-before each release.
-
-For a local publish, create `gradle.properties` (which is ignored by Git) with a GitHub classic
-personal access token that has `write:packages`:
+Keep credentials in your local `~/.gradle/gradle.properties` or another secure secret store:
 
 ```properties
 gpr.user=YOUR_GITHUB_USERNAME
 gpr.key=YOUR_GITHUB_CLASSIC_PAT
 ```
 
-Then run:
+### Build from source
+
+```bash
+git clone https://github.com/ravzeno/excel-library.git
+cd excel-library
+./gradlew build
+```
+
+To install the artifact in your local Maven repository:
+
+```bash
+./gradlew publishToMavenLocal
+```
+
+## Quick start
+
+Import and export models use separate annotations. Column indexes are zero-based.
+
+```java
+public class OrderRow {
+    @ExcelColumn(name = "Order code", index = 0)
+    private String code;
+
+    @ExcelColumn(name = "Amount", index = 1)
+    private BigDecimal amount;
+
+    // Getters and constructor omitted
+}
+
+public class OrderImportRow {
+    @ExcelImportColumn(index = 0, headerName = "Order code", required = true)
+    private String code;
+
+    @ExcelImportColumn(index = 1, headerName = "Amount", dataType = ExcelDataType.NUMERIC)
+    private BigDecimal amount;
+
+    public OrderImportRow() {}
+}
+```
+
+Create services without writing dedicated subclasses. The exporter reads values from fields marked
+with `@ExcelColumn`, ordered by the annotation index:
+
+```java
+var exporter = AbstractExcelExportService.of(OrderRow.class, "Orders");
+var importer = AbstractExcelImportService.of(OrderImportRow.class, 1, 1, 2);
+
+byte[] xlsx = exporter.export(orders).bytes();
+ExcelImportResult<OrderImportRow> result = importer.importFromExcel(xlsx);
+
+System.out.printf("Imported %d of %d rows%n", result.validRows(), result.totalRows());
+```
+
+When export values need transformation, use the mapper overload or override `mapToRow` in a
+subclass:
+
+```java
+var exporter = AbstractExcelExportService.of(
+    OrderRow.class, "Orders",
+    row -> new Object[] {row.getCode(), row.getAmount().setScale(2)}
+);
+```
+
+The importer factory arguments are the entity class, one-based worksheet number, one-based header
+row, and one-based first data row. For upload streams, call `importFromExcel(inputStream)`; the
+stream is consumed but not closed by the library.
+
+## Import validation
+
+`@ExcelImportColumn` supports required values, text length limits, numeric limits, enumerated
+values, and regular-expression patterns:
+
+```java
+@ExcelImportColumn(
+    index = 0,
+    headerName = "Status",
+    required = true,
+    allowedValues = {"NEW", "PAID", "CANCELLED"}
+)
+private String status;
+```
+
+When `headerName` is set, the uploaded header is checked before any data rows are mapped. Import
+results contain valid rows, counts, and structured errors. Error row and column coordinates are
+zero-based physical worksheet coordinates.
+
+For rules involving more than one field, override `validateRow` in an importer subclass. Return one
+or more `ExcelImportError` values to reject that row. To give users a corrected copy of their
+upload, create an error workbook:
+
+```java
+byte[] errorWorkbook = ExcelImportErrorWorkbook.create(originalXlsx, result);
+```
+
+The error workbook highlights invalid cells and attaches each message as a cell comment.
+
+## Templates and multiple sheets
+
+Create a header-only template with `exportTemplate`. Create a workbook with several worksheets by
+passing `ExcelExportRequest` values to `exportWorkbook`:
+
+```java
+var template = exporter.exportTemplate("Orders", "orders-template.xlsx");
+
+var workbook = exporter.exportWorkbook(
+    List.of(
+        new ExcelExportRequest<>(pendingOrders, "Pending", "orders.xlsx", null, null),
+        new ExcelExportRequest<>(completedOrders, "Completed", "orders.xlsx", null, null)
+    ),
+    "orders.xlsx"
+);
+```
+
+Exported sheets freeze the header row by default. Set `freezeHeader` to `false` on an
+`ExcelExportRequest` to disable it. `@ExcelColumn(allowedValues = ...)` adds a dropdown list to the
+exported column.
+
+## Streaming large imports and exports
+
+The XLSX importer uses Apache POI's SAX reader. The exporter uses a streaming workbook and keeps a
+bounded row window in memory. For exports, pass a lazy `Iterable` and write directly to an output
+stream:
+
+```java
+exporter.writeTo(databaseRows, outputStream);
+```
+
+For imports, use `importEach` to handle each valid row immediately, or `importInBatches` to retain
+only a bounded batch of mapped rows:
+
+```java
+ExcelImportSummary summary = importer.importInBatches(
+    inputStream,
+    500,
+    batch -> orderRepository.saveAll(batch)
+);
+```
+
+`ExcelImportSummary` reports row counts and validation errors without retaining the successfully
+mapped rows. Errors are retained in the summary, so files with a very large number of invalid rows
+can still require substantial memory.
+
+## Date handling
+
+Date fields support the standard `ExcelDateFormat` values. Supply a Java time pattern with
+`datePattern` when a column uses a different format:
+
+```java
+@ExcelImportColumn(index = 2, datePattern = "dd-MM-yyyy")
+private LocalDate orderDate;
+```
+
+Numeric date fields accept padded and unpadded days and months, such as `01/11/2026` and
+`1/11/2026`. The selected date format determines whether the value is interpreted day-first or
+month-first.
+
+For fields typed as `Instant`, override `getZoneId()` in your importer to define the timezone used
+to interpret imported local date-times. The default is the JVM timezone.
+
+## CSV imports
+
+CSV files can be imported with the same annotations, header checks, conversion, and validation as
+XLSX:
+
+```java
+ExcelImportResult<OrderImportRow> result = importer.importFromCsv(csvInputStream);
+```
+
+The default character set is UTF-8. To specify another character set or worksheet-style layout,
+use `importFromCsv(inputStream, charset, request)`. CSV input is converted to an intermediate
+workbook before mapping, so use the XLSX streaming APIs for very large files.
+
+## Spring Boot integration
+
+The library does not depend on Spring. In a Spring Boot controller, pass the uploaded file's
+stream directly to the importer:
+
+```java
+@PostMapping("/orders/import")
+public ExcelImportResult<OrderImportRow> importOrders(
+        @RequestParam("file") MultipartFile file) throws IOException {
+    return orderImporter.importFromExcel(file.getInputStream());
+}
+```
+
+## Publishing
+
+GitHub Releases trigger the repository's release workflow to publish the package to GitHub
+Packages. Published versions are immutable; update `version` in `build.gradle.kts` before each
+release.
+
+For a local publish, provide `gpr.user` and `gpr.key` in the repository's ignored
+`gradle.properties` file, then run:
 
 ```bash
 ./gradlew publish
 ```
-
-Projects that consume this package must add the GitHub Packages Maven repository and authenticate
-with a GitHub classic personal access token that has `read:packages`.

@@ -174,7 +174,7 @@ public final class ExcelDataBuilder {
   /** Creates row zero, including header text, widths, and column-specific header styling. */
   private void createHeaderRow(Sheet sheet) {
     Row row = sheet.createRow(0);
-    row.setHeight((short) headerRowHeight);
+    row.setHeightInPoints(headerRowHeight);
     for (int index = 0; index < headerColumns.length; index++) {
       ExcelHeaderColumn column = headerColumns[index];
       Cell cell = row.createCell(index);

@@ -29,7 +29,7 @@ public final class ExcelImportErrorWorkbook {
   public static byte[] create(byte[] source, List<ExcelImportError> errors) throws IOException {
     if (source == null) throw new NullPointerException("source must not be null");
     if (errors == null) throw new NullPointerException("errors must not be null");
-    try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(source));
+    try (XSSFWorkbook workbook = openWorkbook(source);
         ByteArrayOutputStream output = new ByteArrayOutputStream()) {
       CreationHelper helper = workbook.getCreationHelper();
       for (ExcelImportError error : errors) {
@@ -56,6 +56,14 @@ public final class ExcelImportErrorWorkbook {
       }
       workbook.write(output);
       return output.toByteArray();
+    }
+  }
+
+  private static XSSFWorkbook openWorkbook(byte[] source) throws IOException {
+    try {
+      return new XSSFWorkbook(new ByteArrayInputStream(source));
+    } catch (RuntimeException exception) {
+      throw new IOException("Unable to read source XLSX workbook", exception);
     }
   }
 

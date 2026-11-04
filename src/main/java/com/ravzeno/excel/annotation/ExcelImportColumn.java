@@ -43,6 +43,9 @@ public @interface ExcelImportColumn {
    */
   ExcelDateFormat dateFormat() default ExcelDateFormat.THAI_DATE;
 
+  /** Optional Java time pattern tried before the standard formats. */
+  String datePattern() default "";
+
   /**
    * Returns whether an empty cell is reported as a validation error.
    *

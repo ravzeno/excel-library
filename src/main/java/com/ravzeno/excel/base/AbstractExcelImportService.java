@@ -6,16 +6,21 @@ import com.ravzeno.excel.enums.ExcelImportProblem;
 import com.ravzeno.excel.enums.ExcelImportProblemCode;
 import com.ravzeno.excel.model.ConvertValueData;
 import com.ravzeno.excel.model.ExcelReadDataDto;
+import com.ravzeno.excel.model.import_.CsvImportSupport;
 import com.ravzeno.excel.model.import_.ExcelImportError;
 import com.ravzeno.excel.model.import_.ExcelImportRequest;
 import com.ravzeno.excel.model.import_.ExcelImportResult;
+import com.ravzeno.excel.model.import_.ExcelImportSummary;
 import com.ravzeno.excel.util.ExcelUtils;
 import java.io.ByteArrayInputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -27,13 +32,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
-import org.apache.poi.ooxml.util.SAXHelper;
 import org.apache.poi.openxml4j.opc.OPCPackage;
 import org.apache.poi.ss.usermodel.DataFormatter;
 import org.apache.poi.ss.util.CellReference;
-import org.apache.poi.xssf.eventusermodel.ReadOnlySharedStringsTable;
+import org.apache.poi.util.XMLHelper;
 import org.apache.poi.xssf.eventusermodel.XSSFReader;
 import org.apache.poi.xssf.eventusermodel.XSSFSheetXMLHandler;
 import org.xml.sax.InputSource;
@@ -119,6 +124,11 @@ public abstract class AbstractExcelImportService<T> {
    */
   protected abstract Class<T> getEntityClass();
 
+  /** Zone used when converting imported local date-times to {@link Instant}. */
+  protected ZoneId getZoneId() {
+    return ZoneId.systemDefault();
+  }
+
   /**
    * ตรวจสอบ header ก่อน map แถว สามารถ override เพื่อบังคับ header ให้ตรงตาม template
    *
@@ -166,15 +176,27 @@ public abstract class AbstractExcelImportService<T> {
   }
 
   /**
-   * Imports an XLSX document from a stream. The stream is consumed and closed before this method
-   * returns.
+   * Imports an XLSX document from a stream. The stream is consumed but not closed by this method.
    *
-   * @param input XLSX source stream
+   * @param input XLSX source stream; consumed but not closed by this method
    * @return valid mapped rows and validation errors
    * @throws IOException if the XLSX document cannot be parsed
    */
   public ExcelImportResult<T> importFromExcel(InputStream input) throws IOException {
     return importFromExcel(input, null);
+  }
+
+  /** Imports comma-separated text using UTF-8 and the same annotations and validation as XLSX. */
+  public ExcelImportResult<T> importFromCsv(InputStream input) throws IOException {
+    return importFromCsv(input, StandardCharsets.UTF_8, null);
+  }
+
+  /** Imports comma-separated text with an explicit character set and worksheet-style layout. */
+  public ExcelImportResult<T> importFromCsv(
+      InputStream input, Charset charset, ExcelImportRequest request) throws IOException {
+    Objects.requireNonNull(input, "input must not be null");
+    Objects.requireNonNull(charset, "charset must not be null");
+    return importFromExcel(CsvImportSupport.toXlsx(input, charset), request);
   }
 
   /**
@@ -192,6 +214,42 @@ public abstract class AbstractExcelImportService<T> {
     return readExcel(input, resolved);
   }
 
+  /** Streams successfully mapped rows to a consumer instead of retaining them in the result. */
+  public ExcelImportSummary importEach(InputStream input, Consumer<? super T> rowConsumer)
+      throws IOException {
+    return importEach(input, null, rowConsumer);
+  }
+
+  /** Streams successfully mapped rows to a consumer using the supplied worksheet layout. */
+  public ExcelImportSummary importEach(
+      InputStream input, ExcelImportRequest request, Consumer<? super T> rowConsumer)
+      throws IOException {
+    Objects.requireNonNull(rowConsumer, "rowConsumer must not be null");
+    StreamingSheetHandler handler = readExcel(input, resolveRequest(request), rowConsumer);
+    return handler.toSummary();
+  }
+
+  /** Delivers bounded batches of valid rows to a consumer. */
+  public ExcelImportSummary importInBatches(
+      InputStream input, int batchSize, Consumer<? super List<T>> batchConsumer)
+      throws IOException {
+    if (batchSize < 1) throw new IllegalArgumentException("batchSize must be positive");
+    Objects.requireNonNull(batchConsumer, "batchConsumer must not be null");
+    List<T> batch = new ArrayList<>(batchSize);
+    ExcelImportSummary summary =
+        importEach(
+            input,
+            value -> {
+              batch.add(value);
+              if (batch.size() == batchSize) {
+                batchConsumer.accept(List.copyOf(batch));
+                batch.clear();
+              }
+            });
+    if (!batch.isEmpty()) batchConsumer.accept(List.copyOf(batch));
+    return summary;
+  }
+
   /** Combines an optional per-call layout with the subclass's default worksheet layout. */
   private ExcelImportRequest resolveRequest(ExcelImportRequest request) {
     return request == null
@@ -203,48 +261,54 @@ public abstract class AbstractExcelImportService<T> {
    * Parses the requested worksheet through POI's SAX API, keeping only the current XML row in
    * memory while mapping it to a target object.
    */
-  @SuppressWarnings(
-      "deprecation") // POI's streaming shared-string reader avoids loading strings into memory.
   private ExcelImportResult<T> readExcel(InputStream input, ExcelImportRequest request)
       throws IOException {
+    return readExcel(input, request, null).toResult();
+  }
+
+  private StreamingSheetHandler readExcel(
+      InputStream input, ExcelImportRequest request, Consumer<? super T> rowConsumer)
+      throws IOException {
     int sheetNo = request.getSheetNoOrDefault();
-    if (sheetNo < 1) {
+    if (sheetNo < 1)
       throw new IllegalArgumentException("Sheet number must be at least 1, got: " + sheetNo);
-    }
     int headerRow = request.getHeaderRowOrDefault();
     int dataRow = request.getDataRowOrDefault();
-    if (headerRow < 1) {
+    if (headerRow < 1)
       throw new IllegalArgumentException("Header row must be at least 1, got: " + headerRow);
-    }
-    if (dataRow <= headerRow) {
+    if (dataRow <= headerRow)
       throw new IllegalArgumentException(
           "Data row must be after header row, got header row "
               + headerRow
               + " and data row "
               + dataRow);
-    }
     StreamingSheetHandler handler =
-        new StreamingSheetHandler(request, mappingsFor(getEntityClass()));
-    try (OPCPackage packageFile = OPCPackage.open(input)) {
+        new StreamingSheetHandler(request, mappingsFor(getEntityClass()), rowConsumer);
+    InputStream packageInput =
+        new FilterInputStream(input) {
+          @Override
+          public void close() {
+            // The caller owns the original input stream.
+          }
+        };
+    try (OPCPackage packageFile = OPCPackage.open(packageInput)) {
       XSSFReader reader = new XSSFReader(packageFile);
+      reader.setUseReadOnlySharedStringsTable(true);
+      var sharedStrings = reader.getSharedStringsTable();
       try (InputStream sheet = sheetFor(reader, sheetNo)) {
-        XMLReader parser = SAXHelper.newXMLReader();
+        XMLReader parser = XMLHelper.newXMLReader();
         parser.setContentHandler(
             new XSSFSheetXMLHandler(
-                reader.getStylesTable(),
-                null,
-                new ReadOnlySharedStringsTable(packageFile),
-                handler,
-                new DataFormatter(),
-                false));
+                reader.getStylesTable(), null, sharedStrings, handler, new DataFormatter(), false));
         parser.parse(new InputSource(sheet));
       }
     } catch (IllegalArgumentException exception) {
       throw exception;
     } catch (Exception exception) {
+      if (handler.consumerFailure != null) throw handler.consumerFailure;
       throw new IOException("Unable to parse XLSX worksheet", exception);
     }
-    return handler.toResult();
+    return handler;
   }
 
   /** Selects the requested one-based sheet and closes all preceding sheet streams. */
@@ -299,6 +363,8 @@ public abstract class AbstractExcelImportService<T> {
     /** Cached annotated fields used to map the current row. */
     private final List<FieldColumnMapping> mappings;
 
+    private final Consumer<? super T> rowConsumer;
+
     /** Successfully mapped values returned to the caller after parsing completes. */
     private final List<T> values = new ArrayList<>();
 
@@ -320,9 +386,17 @@ public abstract class AbstractExcelImportService<T> {
     /** Count of non-empty data rows processed, regardless of validation result. */
     private int totalRows;
 
-    private StreamingSheetHandler(ExcelImportRequest request, List<FieldColumnMapping> mappings) {
+    private int validRows;
+
+    private RuntimeException consumerFailure;
+
+    private StreamingSheetHandler(
+        ExcelImportRequest request,
+        List<FieldColumnMapping> mappings,
+        Consumer<? super T> rowConsumer) {
       this.request = request;
       this.mappings = mappings;
+      this.rowConsumer = rowConsumer;
     }
 
     @Override
@@ -353,8 +427,18 @@ public abstract class AbstractExcelImportService<T> {
         if (customErrors == null) {
           throw new IllegalStateException("validateRow must not return null");
         }
-        if (customErrors.isEmpty()) values.add(mapped);
-        else errors.addAll(customErrors);
+        if (customErrors.isEmpty()) {
+          if (rowConsumer == null) values.add(mapped);
+          else {
+            try {
+              rowConsumer.accept(mapped);
+            } catch (RuntimeException exception) {
+              consumerFailure = exception;
+              throw exception;
+            }
+          }
+          validRows++;
+        } else errors.addAll(customErrors);
       }
     }
 
@@ -370,10 +454,19 @@ public abstract class AbstractExcelImportService<T> {
       currentRow.set(columnIndex, formattedValue == null ? "" : formattedValue);
     }
 
+    /**
+     * POI reports print-area metadata through this callback; it does not affect imported cell data.
+     */
     @Override
     public void headerFooter(String text, boolean isHeader, String tagName) {}
 
     private ExcelImportResult<T> toResult() {
+      ExcelImportSummary summary = toSummary();
+      return new ExcelImportResult<>(
+          values, errors, totalRows, summary.validRows(), summary.invalidRows());
+    }
+
+    private ExcelImportSummary toSummary() {
       if (!readHeaders) {
         errors.add(
             new ExcelImportError(
@@ -393,7 +486,7 @@ public abstract class AbstractExcelImportService<T> {
                   .filter(row -> row >= firstDataRow)
                   .distinct()
                   .count();
-      return new ExcelImportResult<>(values, errors, totalRows, values.size(), invalidRows);
+      return new ExcelImportSummary(totalRows, validRows, invalidRows, errors);
     }
 
     private boolean isCurrentRowEmpty() {
@@ -481,6 +574,10 @@ public abstract class AbstractExcelImportService<T> {
       return convertEnum(raw, target);
     }
     if (target == Object.class) {
+      if (!mapping.annotation().datePattern().isBlank()) {
+        ConvertValueData explicitDate = convertDate(raw, target, mapping);
+        if (explicitDate.isConvertSuccess()) return explicitDate;
+      }
       if (ExcelUtils.isNumeric(raw)) {
         return convertNumber(raw, target);
       }
@@ -501,17 +598,21 @@ public abstract class AbstractExcelImportService<T> {
       return new ConvertValueData(null, true);
     }
     if (target == LocalDate.class || target == Object.class) {
-      LocalDate value = ExcelUtils.parseDate(raw, mapping.annotation().dateFormat());
+      LocalDate value =
+          ExcelUtils.parseDate(
+              raw, mapping.annotation().dateFormat(), mapping.annotation().datePattern());
       return value == null ? ConvertValueData.failure() : new ConvertValueData(value, true);
     }
-    LocalDateTime value = ExcelUtils.parseDateTime(raw, mapping.annotation().dateFormat());
+    LocalDateTime value =
+        ExcelUtils.parseDateTime(
+            raw, mapping.annotation().dateFormat(), mapping.annotation().datePattern());
     if (value == null) return ConvertValueData.failure();
     return new ConvertValueData(
-        target == Instant.class ? value.atZone(ZoneId.systemDefault()).toInstant() : value, true);
+        target == Instant.class ? value.atZone(getZoneId()).toInstant() : value, true);
   }
 
   /** Matches enum names case-insensitively so spreadsheet values remain user-friendly. */
-  @SuppressWarnings({"unchecked", "rawtypes"})
+  @SuppressWarnings({"rawtypes"})
   private ConvertValueData convertEnum(String raw, Class<?> target) {
     for (Object constant : target.getEnumConstants()) {
       if (((Enum) constant).name().equalsIgnoreCase(raw.trim())) {

@@ -13,8 +13,10 @@ import java.io.OutputStream;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import org.apache.poi.xssf.streaming.SXSSFWorkbook;
 
@@ -28,6 +30,8 @@ import org.apache.poi.xssf.streaming.SXSSFWorkbook;
  * @param <T> ชนิดข้อมูล domain ที่แทนหนึ่งแถวใน spreadsheet
  */
 public abstract class AbstractExcelExportService<T> {
+  private static final Map<Class<?>, List<ExcelColumnDef>> COLUMN_CACHE = new ConcurrentHashMap<>();
+
   /** constructor สำหรับคลาสลูก */
   protected AbstractExcelExportService() {}
 
@@ -64,6 +68,25 @@ public abstract class AbstractExcelExportService<T> {
   }
 
   /**
+   * Creates an exporter that reads values directly from fields annotated with {@code @ExcelColumn}.
+   */
+  public static <T> AbstractExcelExportService<T> of(Class<T> entityClass, String sheetName) {
+    Objects.requireNonNull(entityClass, "entityClass must not be null");
+    Objects.requireNonNull(sheetName, "sheetName must not be null");
+    return new AbstractExcelExportService<>() {
+      @Override
+      protected String getSheetName() {
+        return sheetName;
+      }
+
+      @Override
+      protected Class<T> getEntityClass() {
+        return entityClass;
+      }
+    };
+  }
+
+  /**
    * ระบุชื่อ worksheet เริ่มต้นที่จะแสดงในไฟล์
    *
    * @return ชื่อ worksheet
@@ -76,7 +99,22 @@ public abstract class AbstractExcelExportService<T> {
    * @param value ข้อมูล domain ต้นทาง
    * @return array ค่า cell ที่ต้องไม่เป็น {@code null}
    */
-  protected abstract Object[] mapToRow(T value);
+  protected Object[] mapToRow(T value) {
+    Objects.requireNonNull(value, "value must not be null");
+    List<ExcelColumnDef> columns = columnsFor(getEntityClass());
+    Object[] cells = new Object[columns.size()];
+    try {
+      for (int index = 0; index < columns.size(); index++) {
+        var field = columns.get(index).field();
+        field.setAccessible(true);
+        cells[index] = field.get(value);
+      }
+    } catch (IllegalAccessException exception) {
+      throw new IllegalStateException(
+          "Unable to read an @ExcelColumn field from " + getEntityClass().getName(), exception);
+    }
+    return cells;
+  }
 
   /**
    * ระบุ type ที่ประกาศ annotation {@code @ExcelColumn} สำหรับ schema
@@ -227,25 +265,29 @@ public abstract class AbstractExcelExportService<T> {
 
   /** อ่านและตรวจสอบ schema ของคอลัมน์ตามลำดับที่ประกาศบน target type */
   private List<ExcelColumnDef> columnsFor(Class<?> type) {
-    List<ExcelColumnDef> columns =
-        java.util.Arrays.stream(type.getDeclaredFields())
-            .filter(field -> field.isAnnotationPresent(ExcelColumn.class))
-            .map(ExcelColumnDef::fromField)
-            .sorted(
-                Comparator.comparingInt(
-                    column -> column.index() < 0 ? Integer.MAX_VALUE : column.index()))
-            .toList();
-    if (columns.isEmpty()) {
-      throw new IllegalArgumentException("No @ExcelColumn fields found on " + type.getName());
-    }
-    Set<Integer> indexes = new HashSet<>();
-    for (ExcelColumnDef column : columns) {
-      if (column.index() >= 0 && !indexes.add(column.index())) {
-        throw new IllegalArgumentException(
-            "Duplicate @ExcelColumn index " + column.index() + " on " + type.getName());
-      }
-    }
-    return columns;
+    return COLUMN_CACHE.computeIfAbsent(
+        type,
+        key -> {
+          List<ExcelColumnDef> columns =
+              java.util.Arrays.stream(key.getDeclaredFields())
+                  .filter(field -> field.isAnnotationPresent(ExcelColumn.class))
+                  .map(ExcelColumnDef::fromField)
+                  .sorted(
+                      Comparator.comparingInt(
+                          column -> column.index() < 0 ? Integer.MAX_VALUE : column.index()))
+                  .toList();
+          if (columns.isEmpty()) {
+            throw new IllegalArgumentException("No @ExcelColumn fields found on " + key.getName());
+          }
+          Set<Integer> indexes = new HashSet<>();
+          for (ExcelColumnDef column : columns) {
+            if (column.index() >= 0 && !indexes.add(column.index())) {
+              throw new IllegalArgumentException(
+                  "Duplicate @ExcelColumn index " + column.index() + " on " + key.getName());
+            }
+          }
+          return columns;
+        });
   }
 
   /** แปลงข้อมูลต้นทางเป็น array ของ cell แบบ lazy โดยไม่สร้างทุกแถวล่วงหน้า */

@@ -5,6 +5,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
 import java.util.regex.Pattern;
 
@@ -21,14 +22,22 @@ public final class ExcelUtils {
    * @return parsed date, or {@code null} when none of the formats match
    */
   public static LocalDate parseDate(Object value, ExcelDateFormat format) {
+    return parseDate(value, format, "");
+  }
+
+  public static LocalDate parseDate(Object value, ExcelDateFormat format, String customPattern) {
     if (value == null) return null;
     String text = value.toString().trim();
+    if (customPattern != null && !customPattern.isBlank())
+      try {
+        return normalizeThaiBuddhistYear(parseLocalDate(text, customPattern));
+      } catch (DateTimeParseException ignored) {
+      }
     if (text.matches("^\\d+(\\.0)?$"))
       return LocalDate.of(1899, 12, 30).plusDays(Long.parseLong(text.split("\\.")[0]));
     for (ExcelDateFormat candidate : orderedFormats(format)) {
       try {
-        return normalizeThaiBuddhistYear(
-            LocalDate.parse(text, DateTimeFormatter.ofPattern(candidate.getPattern())));
+        return normalizeThaiBuddhistYear(parseLocalDate(text, candidate.getPattern()));
       } catch (DateTimeParseException ignored) {
       }
     }
@@ -37,15 +46,25 @@ public final class ExcelUtils {
 
   /** Parses date-time text, accepting date-only input as the start of that day. */
   public static LocalDateTime parseDateTime(Object value, ExcelDateFormat format) {
+    return parseDateTime(value, format, "");
+  }
+
+  public static LocalDateTime parseDateTime(
+      Object value, ExcelDateFormat format, String customPattern) {
     if (value == null) return null;
     String text = value.toString().trim();
+    if (customPattern != null && !customPattern.isBlank())
+      try {
+        return parseLocalDateTime(text, customPattern);
+      } catch (DateTimeParseException ignored) {
+      }
     for (ExcelDateFormat candidate : orderedFormats(format)) {
       try {
-        return LocalDateTime.parse(text, DateTimeFormatter.ofPattern(candidate.getPattern()));
+        return parseLocalDateTime(text, candidate.getPattern());
       } catch (DateTimeParseException ignored) {
       }
     }
-    LocalDate date = parseDate(text, format);
+    LocalDate date = parseDate(text, format, customPattern);
     return date == null ? null : date.atStartOfDay();
   }
 
@@ -86,6 +105,26 @@ public final class ExcelUtils {
     int index = 1;
     for (ExcelDateFormat value : values) if (value != preferred) result[index++] = value;
     return result;
+  }
+
+  /** Accepts both padded and unpadded numeric date/time fields for a configured pattern. */
+  private static LocalDate parseLocalDate(String text, String pattern) {
+    try {
+      return LocalDate.parse(text, DateTimeFormatter.ofPattern(pattern));
+    } catch (DateTimeParseException strictFailure) {
+      return LocalDate.parse(
+          text, new DateTimeFormatterBuilder().parseLenient().appendPattern(pattern).toFormatter());
+    }
+  }
+
+  /** Accepts both padded and unpadded numeric date/time fields for a configured pattern. */
+  private static LocalDateTime parseLocalDateTime(String text, String pattern) {
+    try {
+      return LocalDateTime.parse(text, DateTimeFormatter.ofPattern(pattern));
+    } catch (DateTimeParseException strictFailure) {
+      return LocalDateTime.parse(
+          text, new DateTimeFormatterBuilder().parseLenient().appendPattern(pattern).toFormatter());
+    }
   }
 
   /** Converts Buddhist Era years, identified by a year above 2400, to Common Era years. */
