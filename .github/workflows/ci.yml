@@ -1,0 +1,116 @@
+# Render with scripts/render-workflow.mjs before use. No publishing.
+name: Library CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checkout:
+    name: Checkout
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+  build:
+    name: Build
+    needs: checkout
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build
+        run: ./gradlew assemble
+  lint:
+    name: Lint
+    needs: checkout
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Lint
+        run: ./gradlew spotlessCheck
+  test:
+    name: Test
+    needs: checkout
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test
+        run: ./gradlew test
+  notify-discord:
+    name: Notify Discord
+    needs: [checkout, build, lint, test]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Send CI result
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          JOB_RESULTS: ${{ toJSON(needs) }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message || github.event.pull_request.title }}
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          node <<'NODE'
+          // Shared notification script. Inlined into generated GitHub Actions workflow.
+          const webhook = process.env.DISCORD_WEBHOOK_URL;
+          if (!webhook) {
+            console.log('Discord notification skipped: DISCORD_WEBHOOK_URL is unavailable.');
+            process.exit(0);
+          }
+          const needs = JSON.parse(process.env.JOB_RESULTS || '{}');
+          const jobs = Object.entries(needs).map(([name, info]) => ({ name, result: info.result || 'unknown' }));
+          const success = jobs.length > 0 && jobs.every((job) => job.result === 'success');
+          const field = (name, value, inline = false) => ({
+            name, value: String(value || 'N/A').slice(0, 1024), inline,
+          });
+          const payload = {
+            allowed_mentions: { parse: [] },
+            embeds: [{
+              title: '🚀 Build event',
+              color: success ? 0x2ecc71 : 0xe74c3c,
+              fields: [
+                field('Repository', process.env.REPOSITORY, true),
+                field('Branch', process.env.BRANCH_NAME, true),
+                field('Commit', (process.env.COMMIT_SHA || '').slice(0, 7), true),
+                field('By', process.env.ACTOR, true),
+                field('Message', process.env.COMMIT_MESSAGE),
+                field('Status', success ? '✅ SUCCESS' : '❌ FAIL'),
+                field('Log', process.env.RUN_URL),
+              ],
+            }],
+          };
+          fetch(webhook, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }).then((response) => {
+            if (!response.ok) throw new Error(`Discord returned HTTP ${response.status}`);
+            console.log('Discord notification sent.');
+          }).catch((error) => {
+            console.error(error.message);
+            process.exitCode = 1;
+          });
+          NODE
