@@ -66,3 +66,71 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.release_version.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify-discord:
+    name: Notify Discord
+    needs: [verify, publish]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Send CI result
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message || github.event.pull_request.title || github.event.release.name }}
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          node <<'NODE'
+          const webhook = process.env.DISCORD_WEBHOOK_URL;
+          if (!webhook) {
+            console.log('Discord notification skipped: DISCORD_WEBHOOK_URL is unavailable.');
+            process.exit(0);
+          }
+
+          const verify = process.env.VERIFY_RESULT;
+          const publish = process.env.PUBLISH_RESULT;
+          const isRelease = process.env.EVENT_NAME === 'release';
+          const success = verify === 'success' && (isRelease ? publish === 'success' : publish === 'skipped');
+          const status = success ? '✅ SUCCESS' : '❌ FAIL';
+          const field = (name, value, inline = false) => ({
+            name, value: String(value || 'N/A').slice(0, 1024), inline,
+          });
+          const payload = {
+            allowed_mentions: { parse: [] },
+            embeds: [{
+              title: '🚀 Excel Library CI',
+              color: success ? 0x2ecc71 : 0xe74c3c,
+              fields: [
+                field('Repository', process.env.REPOSITORY, true),
+                field('Branch / Tag', process.env.BRANCH_NAME, true),
+                field('Event', process.env.EVENT_NAME, true),
+                field('Commit', (process.env.COMMIT_SHA || '').slice(0, 7), true),
+                field('By', process.env.ACTOR, true),
+                field('Verify', verify, true),
+                field('Publish', isRelease ? publish : 'Not required', true),
+                field('Status', status, true),
+                field('Message', process.env.COMMIT_MESSAGE),
+                field('Log', process.env.RUN_URL),
+              ],
+            }],
+          };
+          fetch(webhook, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }).then((response) => {
+            if (!response.ok) throw new Error(`Discord returned HTTP ${response.status}`);
+            console.log('Discord notification sent.');
+          }).catch((error) => {
+            console.error(error.message);
+            process.exitCode = 1;
+          });
+          NODE
