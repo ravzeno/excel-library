@@ -7,7 +7,10 @@ plugins {
 }
 
 group = "com.ravzeno"
-version = "1.0.0"
+version = providers.gradleProperty("releaseVersion")
+    .orElse(providers.environmentVariable("RELEASE_VERSION"))
+    .orElse("1.0.0")
+    .get()
 
 repositories {
     mavenCentral()
